@@ -466,8 +466,11 @@ function closeQR(){
             if clawbot_state.get("bot"):
                 clawbot_state["bot"].stop()
         print("\n退出中..."); server.shutdown(); sys.exit(0)
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+    try:
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+    except ValueError:
+        pass  # 非主线程（如 app.py 模式）
 
     print(f"""
 ╔══════════════════════════════════════════╗

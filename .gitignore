@@ -5,3 +5,11 @@ __pycache__/
 QR.png
 .pkl
 .DS_Store
+# macOS app build artifacts
+build/
+dist/
+*.app
+*.app.broken
+*.command
+AppIcon.icns
+launch.log
