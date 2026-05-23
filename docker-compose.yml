@@ -1,0 +1,9 @@
+services:
+  wechat-bot:
+    build: .
+    container_name: wechat-bot
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    restart: unless-stopped

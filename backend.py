@@ -148,6 +148,184 @@ class ClaudeCLIBackend(AIBackend):
 
 
 # ============================================================
+# Agent 后端（API + 工具调用）
+# ============================================================
+
+class AgentBackend(AIBackend):
+    """Agent 后端，通过 Anthropic API + 工具调用执行本地操作。
+
+    不依赖 claude CLI 二进制文件，直接在 Python 中实现 Agent 回路。
+    """
+
+    TOOLS = [
+        {
+            "name": "run_bash",
+            "description": "Execute a bash shell command. Use for: launching apps, file ops, git, running scripts, system info.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The bash command"}
+                },
+                "required": ["command"],
+            },
+        },
+        {
+            "name": "read_file",
+            "description": "Read the complete contents of a file.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute file path"}
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "write_file",
+            "description": "Write or overwrite a file.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute file path"},
+                    "content": {"type": "string", "description": "Content to write"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    ]
+
+    DANGEROUS = [
+        "rm -rf /", "sudo rm", "mkfs", "dd if=", ":(){", "chmod 777 /",
+        "> /dev/sda", "format c:", "del /f /s",
+    ]
+
+    def __init__(self, api_key: str, model: str, base_url: str = ""):
+        import anthropic
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = anthropic.Anthropic(**kwargs)
+        self.model = model
+        self._platform_blurb = self._detect_platform()
+
+    @staticmethod
+    def _detect_platform() -> str:
+        import platform
+        import os
+        import socket
+        sysname = platform.system()
+        return (
+            f"运行环境：{sysname} {platform.release()} ({platform.machine()})\n"
+            f"主机：{socket.gethostname()}  用户：{os.getenv('USER', '?')}\n"
+            f"工作目录：{os.getcwd()}\n"
+            f"注意：你在 {sysname} 系统上。macOS 用 'open -a AppName' 打开应用，"
+            f"Linux 用应用名或 xdg-open。"
+        )
+
+    def _execute(self, name: str, inp: dict) -> str:
+        if name == "run_bash":
+            cmd = inp["command"]
+            for pattern in self.DANGEROUS:
+                if pattern in cmd.lower():
+                    return f"BLOCKED: dangerous pattern '{pattern}'"
+            try:
+                r = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=30
+                )
+                return f"RC={r.returncode}\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+            except subprocess.TimeoutExpired:
+                return "Error: timeout (30s)"
+            except Exception as e:
+                return f"Error: {e}"
+        elif name == "read_file":
+            try:
+                with open(inp["path"]) as f:
+                    return f.read()
+            except Exception as e:
+                return f"Error: {e}"
+        elif name == "write_file":
+            try:
+                with open(inp["path"], "w") as f:
+                    f.write(inp["content"])
+                return f"OK: wrote {inp['path']}"
+            except Exception as e:
+                return f"Error: {e}"
+        return f"Unknown tool: {name}"
+
+    def chat(self, messages: list[dict]) -> str:
+        user_system = ""
+        chat_msgs = []
+        for m in messages:
+            if m["role"] == "system":
+                user_system = m["content"]
+            else:
+                chat_msgs.append({"role": m["role"], "content": m["content"]})
+
+        system = f"{user_system}\n\n{self._platform_blurb}" if user_system else self._platform_blurb
+
+        for _ in range(10):
+            kwargs = {
+                "model": self.model,
+                "max_tokens": 2048,
+                "messages": chat_msgs,
+                "tools": self.TOOLS,
+            }
+            if system:
+                kwargs["system"] = [{"type": "text", "text": system}]
+
+            resp = self.client.messages.create(**kwargs)
+
+            tool_uses = []
+            texts = []
+            for block in resp.content:
+                if block.type == "text" and block.text.strip():
+                    texts.append(block.text)
+                elif block.type == "tool_use":
+                    tool_uses.append(block)
+
+            if resp.stop_reason == "end_turn":
+                return texts[0] if texts else "(empty response)"
+
+            if not tool_uses:
+                return texts[0] if texts else "(no tool calls)"
+
+            # Rebuild assistant content — must preserve thinking blocks for DeepSeek
+            assistant_content = []
+            for block in resp.content:
+                if block.type == "thinking":
+                    assistant_content.append({
+                        "type": "thinking",
+                        "thinking": block.thinking,
+                        "signature": block.signature,
+                    })
+                elif block.type == "text":
+                    assistant_content.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+
+            chat_msgs.append({"role": "assistant", "content": assistant_content})
+
+            tool_results = []
+            for tu in tool_uses:
+                logger.info("🔧 %s: %s", tu.name, tu.input)
+                result = self._execute(tu.name, tu.input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": result,
+                })
+
+            chat_msgs.append({"role": "user", "content": tool_results})
+
+        return "(max tool rounds reached)"
+
+
+# ============================================================
 # 工厂函数
 # ============================================================
 
@@ -169,6 +347,12 @@ def create_backend(config: dict) -> AIBackend:
     elif backend_type == "claude-cli":
         return ClaudeCLIBackend(
             cmd_template=config.get("claude_cli_cmd", 'claude -p "{prompt}" --print'),
+        )
+    elif backend_type == "agent":
+        return AgentBackend(
+            api_key=config["anthropic_api_key"],
+            model=config.get("anthropic_model", "deepseek-v4-pro"),
+            base_url=config.get("anthropic_base_url", ""),
         )
     else:
         raise ValueError(f"未知的 BACKEND_TYPE: {backend_type}")

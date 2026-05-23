@@ -49,6 +49,8 @@ class ClawBot:
         self.user_id = ""
         self.cursor = ""
         self.running = False
+        self._seen_ids: set[str] = set()
+        self._max_seen = 500
 
     # ---- 登录 ----
 
@@ -181,6 +183,15 @@ class ClawBot:
             context_token = msg.get("context_token", "")
             from_user = msg.get("from_user_id", "")
             msg_id = msg.get("msg_id", "")
+
+            # 消息去重
+            if msg_id:
+                if msg_id in self._seen_ids:
+                    logger.debug("跳过重复消息: %s", msg_id)
+                    return
+                self._seen_ids.add(msg_id)
+                if len(self._seen_ids) > self._max_seen:
+                    self._seen_ids.clear()
 
             # 只处理文本消息
             item_list = msg.get("item_list", [])
