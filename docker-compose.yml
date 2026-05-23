@@ -4,6 +4,10 @@ services:
     container_name: wechat-bot
     ports:
       - "8765:8765"
-    env_file:
-      - .env
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-deepseek-v4-pro}
+      - BACKEND_TYPE=${BACKEND_TYPE:-anthropic}
     restart: unless-stopped

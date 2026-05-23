@@ -6,7 +6,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py backend.py config.py clawbot.py ./
+COPY bot.py backend.py config.py clawbot.py skill_loader.py ./
+COPY skills/ ./skills/
 
 EXPOSE 8765
 

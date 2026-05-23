@@ -47,7 +47,7 @@ class AnthropicBackend(AIBackend):
         if system:
             kwargs["system"] = [{"type": "text", "text": system}]
 
-        resp = self.client.messages.create(**kwargs)
+        resp = self.client.messages.create(**kwargs, timeout=120)
 
         for block in resp.content:
             if getattr(block, "type", None) == "text":
@@ -207,6 +207,22 @@ class AgentBackend(AIBackend):
         self.client = anthropic.Anthropic(**kwargs)
         self.model = model
         self._platform_blurb = self._detect_platform()
+        self._tools = list(self.TOOLS)
+        # 集成 Skill 系统
+        from skill_loader import registry as skill_registry
+        self._skill_registry = skill_registry
+        if self._skill_registry.list_names():
+            self._tools.append({
+                "name": "use_skill",
+                "description": "Load a skill's full instructions by name. Use when a task matches an available skill's description. Available skills: " + ", ".join(self._skill_registry.list_names()),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Skill name to load"}
+                    },
+                    "required": ["name"],
+                },
+            })
 
     @staticmethod
     def _detect_platform() -> str:
@@ -223,6 +239,11 @@ class AgentBackend(AIBackend):
         )
 
     def _execute(self, name: str, inp: dict) -> str:
+        if name == "use_skill":
+            skill = self._skill_registry.get(inp["name"])
+            if not skill:
+                return f"Skill not found: {inp['name']}. Available: " + ", ".join(self._skill_registry.list_names())
+            return f"SKILL LOADED: {skill['name']}\n\n{skill['body']}"
         if name == "run_bash":
             cmd = inp["command"]
             for pattern in self.DANGEROUS:
@@ -262,18 +283,21 @@ class AgentBackend(AIBackend):
                 chat_msgs.append({"role": m["role"], "content": m["content"]})
 
         system = f"{user_system}\n\n{self._platform_blurb}" if user_system else self._platform_blurb
+        skill_meta = self._skill_registry.metadata_text()
+        if skill_meta:
+            system += "\n" + skill_meta
 
         for _ in range(10):
             kwargs = {
                 "model": self.model,
                 "max_tokens": 2048,
                 "messages": chat_msgs,
-                "tools": self.TOOLS,
+                "tools": self._tools,
             }
             if system:
                 kwargs["system"] = [{"type": "text", "text": system}]
 
-            resp = self.client.messages.create(**kwargs)
+            resp = self.client.messages.create(**kwargs, timeout=120)
 
             tool_uses = []
             texts = []

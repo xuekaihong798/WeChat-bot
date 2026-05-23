@@ -14,6 +14,7 @@ import threading
 import logging
 import webbrowser
 from io import BytesIO
+from collections import deque
 
 import requests
 
@@ -49,8 +50,7 @@ class ClawBot:
         self.user_id = ""
         self.cursor = ""
         self.running = False
-        self._seen_ids: set[str] = set()
-        self._max_seen = 500
+        self._seen_ids: deque[str] = deque(maxlen=1000)
 
     # ---- 登录 ----
 
@@ -189,9 +189,7 @@ class ClawBot:
                 if msg_id in self._seen_ids:
                     logger.debug("跳过重复消息: %s", msg_id)
                     return
-                self._seen_ids.add(msg_id)
-                if len(self._seen_ids) > self._max_seen:
-                    self._seen_ids.clear()
+                self._seen_ids.append(msg_id)
 
             # 只处理文本消息
             item_list = msg.get("item_list", [])

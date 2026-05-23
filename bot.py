@@ -175,7 +175,6 @@ def _run_clawbot_thread(token: str, bot_id: str, user_id: str):
 
 def clawbot_start_polling(qrcode_token: str):
     """扫码确认后，获取 token 并启动后台轮询线程。"""
-    data = clawbot_poll_status(qrcode_token)
     resp = requests.get(
         f"{ILINK_BASE}/ilink/bot/get_qrcode_status",
         params={"qrcode": qrcode_token},
@@ -221,57 +220,82 @@ def run_clawbot():
 
 def run_server():
     from http.server import HTTPServer, BaseHTTPRequestHandler
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        """多线程 HTTP Server，并发处理请求。"""
+        daemon_threads = True
 
     HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude/Codex 智能体</title>
+<title>WeChat-bot</title>
 <style>
+:root{
+  --bg:#F2F2F7;--card:#FFFFFF;--text:#1C1C1E;--text2:#8E8E93;--bubble-user:#007AFF;--bubble-user-text:#FFFFFF;
+  --bubble-assistant:#E5E5EA;--bubble-assistant-text:#1C1C1E;--border:rgba(60,60,67,0.08);--shadow:0 1px 3px rgba(0,0,0,0.06);
+  --blur:blur(20px) saturate(180%);--accent:#007AFF;--green:#34C759;--red:#FF3B30;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#1C1C1E;--card:#2C2C2E;--text:#FFFFFF;--text2:#98989D;
+    --bubble-assistant:#2C2C2E;--bubble-assistant-text:#FFFFFF;--border:rgba(255,255,255,0.08);--shadow:0 1px 4px rgba(0,0,0,0.3);
+  }
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#eee;height:100vh;display:flex;flex-direction:column}
-header{background:#16213e;padding:12px 20px;font-size:16px;font-weight:600;border-bottom:1px solid #0f3460;display:flex;align-items:center;gap:8px}
-#chat{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
-.msg{max-width:80%;padding:10px 14px;border-radius:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-size:14px}
-.msg.user{align-self:flex-end;background:#0f3460}
-.msg.assistant{align-self:flex-start;background:#533483}
-.msg.system{align-self:center;background:transparent;color:#888;font-size:12px;padding:4px 8px}
-#input-area{display:flex;padding:12px 16px;gap:8px;border-top:1px solid #0f3460;background:#16213e;flex-wrap:wrap}
-#input{flex:1;min-width:150px;padding:10px 14px;border-radius:8px;border:1px solid #0f3460;background:#1a1a2e;color:#eee;font-size:14px;outline:none;resize:none;min-height:40px;max-height:120px}
-#input:focus{border-color:#533483}
-#send,#wechat-btn{padding:10px 16px;border:none;border-radius:8px;color:#fff;font-size:14px;cursor:pointer;font-weight:600}
-#send{background:#533483}#send:hover{background:#6b44a0}#send:disabled{opacity:.5;cursor:not-allowed}
-#wechat-btn{background:#07c160}#wechat-btn:hover{background:#06ad56}#wechat-btn:disabled{opacity:.5;cursor:not-allowed}
-#wechat-btn.connected{background:#555;cursor:default}
-#agent-toggle{display:flex;align-items:center;gap:6px;font-size:13px;color:#aaa;cursor:pointer;user-select:none;white-space:nowrap}
-#agent-toggle input{accent-color:#533483;width:16px;height:16px;cursor:pointer}
-#agent-toggle.checked{color:#e4bf7a}
-#status{font-size:11px;color:#888;padding:4px 16px 8px}
-#qrmodal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10;justify-content:center;align-items:center}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
+/* ── Header ── */
+header{background:var(--card);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);padding:14px 20px;font-size:17px;font-weight:590;text-align:center;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:center;gap:6px}
+/* ── Chat ── */
+#chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+.msg{max-width:76%;padding:10px 15px;border-radius:20px;line-height:1.45;white-space:pre-wrap;word-break:break-word;font-size:15px;box-shadow:var(--shadow);animation:slideIn .25s ease-out}
+@keyframes slideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.msg.user{align-self:flex-end;background:var(--bubble-user);color:var(--bubble-user-text);border-bottom-right-radius:6px}
+.msg.assistant{align-self:flex-start;background:var(--bubble-assistant);color:var(--bubble-assistant-text);border-bottom-left-radius:6px}
+.msg.system{align-self:center;background:transparent;color:var(--text2);font-size:12px;padding:6px 10px;box-shadow:none;animation:none}
+/* ── Input Area ── */
+#input-area{display:flex;padding:10px 12px 16px;gap:8px;align-items:flex-end;background:var(--card);border-top:1px solid var(--border);position:sticky;bottom:0;backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur)}
+#input{flex:1;padding:11px 18px;border-radius:20px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:15px;font-family:inherit;outline:none;resize:none;min-height:42px;max-height:120px;line-height:1.35;transition:border-color .2s,border-radius .2s}
+#input:focus{border-color:var(--accent);border-radius:22px}
+#send,#wechat-btn{width:42px;height:42px;border-radius:50%;border:none;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:transform .15s,opacity .15s;flex-shrink:0}
+#send{background:var(--accent);color:#fff}#send:hover{transform:scale(1.06)}#send:active{transform:scale(0.96)}#send:disabled{opacity:.35;transform:none}
+#wechat-btn{background:var(--green);color:#fff;font-size:14px}#wechat-btn:hover{transform:scale(1.06)}#wechat-btn:disabled{opacity:.35;transform:none}
+#wechat-btn.connected{background:var(--text2)}
+/* ── Toolbar ── */
+#toolbar{display:flex;align-items:center;gap:4px;padding:0 14px 6px;background:var(--card)}
+#agent-toggle{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);cursor:pointer;user-select:none;padding:4px 10px;border-radius:14px;background:var(--bg);border:1px solid var(--border);transition:all .2s}
+#agent-toggle input{accent-color:var(--accent);width:13px;height:13px;cursor:pointer}
+#agent-toggle.active{color:var(--accent);border-color:var(--accent);background:rgba(0,122,255,0.08)}
+/* ── Status ── */
+#status{font-size:11px;color:var(--text2);text-align:center;padding:6px 16px 10px;background:var(--card)}
+/* ── QR Modal ── */
+#qrmodal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);z-index:20;justify-content:center;align-items:center;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 #qrmodal.show{display:flex}
-#qrbox{background:#1a1a2e;border-radius:12px;padding:24px;text-align:center;max-width:340px}
-#qrbox img{width:240px;height:240px;border-radius:8px;margin:12px 0}
-#qrbox .qr-title{font-size:16px;font-weight:600;margin-bottom:4px}
-#qrbox .qr-hint{font-size:12px;color:#888;margin-bottom:8px}
-#qrbox .qr-status{font-size:14px;color:#07c160;margin-top:8px}
-#qrbox .qr-close{margin-top:12px;padding:8px 24px;border:1px solid #888;border-radius:6px;background:transparent;color:#888;cursor:pointer;font-size:13px}
+#qrbox{background:var(--card);border-radius:20px;padding:28px 24px;text-align:center;max-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.18)}
+#qrbox img{width:220px;height:220px;border-radius:12px;margin:16px 0}
+#qrbox .qr-title{font-size:17px;font-weight:590}
+#qrbox .qr-hint{font-size:13px;color:var(--text2);margin-bottom:4px}
+#qrbox .qr-status{font-size:14px;color:var(--accent);margin-top:6px}
+#qrbox .qr-close{margin-top:14px;padding:8px 28px;border:1px solid var(--border);border-radius:20px;background:transparent;color:var(--text2);cursor:pointer;font-size:14px;font-family:inherit;transition:all .2s}
+#qrbox .qr-close:hover{background:var(--bg)}
 </style>
 </head>
 <body>
-<header>&#129302; 本地 Claude/Codex 智能体</header>
-<div id="chat"><div class="msg system">发送消息开始对话 · /code 需求 · reset 重置</div></div>
+<header><span>WeChat-bot</span></header>
+<div id="chat"><div class="msg system">发送消息开始对话</div></div>
+<div id="toolbar"><label id="agent-toggle" onclick="toggleAgent()"><input type="checkbox" id="agent-cb"> 执行模式</label></div>
 <div id="input-area">
-  <textarea id="input" placeholder="输入消息..." rows="1" autofocus></textarea>
-  <button id="send" onclick="send()">发送</button>
-  <button id="wechat-btn" onclick="startWechat()">微信bot</button>
-  <label id="agent-toggle" onclick="toggleAgent()"><input type="checkbox" id="agent-cb"> 执行</label>
+  <button id="wechat-btn" onclick="startWechat()" title="微信接入">👤</button>
+  <textarea id="input" placeholder="消息..." rows="1" autofocus></textarea>
+  <button id="send" onclick="send()">↑</button>
 </div>
 <div id="status">AI 后端: {backend}</div>
 
 <div id="qrmodal">
   <div id="qrbox">
-    <div class="qr-title">&#128241; 微信扫码接入</div>
-    <div class="qr-hint">用微信扫描二维码，确认后即可在微信中对话</div>
+    <div class="qr-title">微信扫码接入</div>
+    <div class="qr-hint">用微信扫描二维码确认后即可在微信中对话</div>
     <img id="qrimg" src="" alt="QR Code">
     <div class="qr-status" id="qrstatus">等待扫码...</div>
     <button class="qr-close" onclick="closeQR()">关闭</button>
@@ -283,34 +307,38 @@ const c=document.getElementById('chat'),i=document.getElementById('input'),b=doc
       wb=document.getElementById('wechat-btn'),uid='web_'+Date.now(),cb=document.getElementById('agent-cb');
 let qrTimer=null;
 
-function add(role,t){const d=document.createElement('div');d.className='msg '+role;d.textContent=t;c.appendChild(d);c.scrollTop=c.scrollHeight}
+function add(role,t){
+  const d=document.createElement('div');d.className='msg '+role;d.textContent=t;c.appendChild(d);
+  requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight});
+}
 function toggleAgent(){
   const on=cb.checked;
-  document.getElementById('agent-toggle').className=on?'checked':'';
-  i.placeholder=on?'输入指令，AI 可执行本地操作...':'输入消息...';
+  document.getElementById('agent-toggle').className='agent-toggle'+(on?' active':'');
+  i.placeholder=on?'输入指令，可执行本地操作…':'消息…';
 }
 function send(){
   const t=i.value.trim();if(!t)return;
   const agent=cb.checked;
-  add('user',(agent?'[执行] ':'')+t);i.value='';b.disabled=true;
+  add('user',t);i.value='';b.disabled=true;
   const ep=agent?'/api/agent':'/api/chat';
   fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:t,user_id:uid})})
     .then(r=>r.json()).then(d=>{add('assistant',d.reply||d.error)})
     .catch(e=>add('system','请求失败: '+e.message)).finally(()=>{b.disabled=false;i.focus()});
 }
 i.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+i.addEventListener('input',()=>{i.style.height='auto';i.style.height=Math.min(i.scrollHeight,120)+'px'});
 
 function startWechat(){
   if(wb.classList.contains('connected')) return;
-  wb.disabled=true; wb.textContent='获取中...';
+  wb.disabled=true; wb.textContent='…';
   document.getElementById('qrmodal').classList.add('show');
-  document.getElementById('qrstatus').textContent='获取二维码...';
+  document.getElementById('qrstatus').textContent='获取二维码…';
 
   fetch('/api/wechat/qrcode',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
     .then(r=>r.json()).then(d=>{
       if(d.error){alert(d.error);closeQR();return;}
       document.getElementById('qrimg').src=d.qrcode_img;
-      document.getElementById('qrstatus').textContent='等待扫码...';
+      document.getElementById('qrstatus').textContent='等待扫码…';
       pollQR(d.qrcode_token);
     }).catch(e=>{alert('获取二维码失败');closeQR()});
 }
@@ -319,13 +347,13 @@ function pollQR(token){
   qrTimer=setInterval(()=>{
     fetch('/api/wechat/status?qrcode='+encodeURIComponent(token))
       .then(r=>r.json()).then(d=>{
-        if(d.status==='scaned') document.getElementById('qrstatus').textContent='已扫描，请在手机上确认...';
+        if(d.status==='scaned') document.getElementById('qrstatus').textContent='已扫描，请在手机上确认…';
         else if(d.status==='confirmed'){
-          document.getElementById('qrstatus').textContent='✅ 已接入！微信中即可对话';
-          wb.textContent='微信已接入'; wb.classList.add('connected');
+          document.getElementById('qrstatus').textContent='已接入！微信中即可对话';
+          wb.textContent='✓'; wb.classList.add('connected');
           clearInterval(qrTimer);
         }else if(d.status==='expired'){
-          document.getElementById('qrstatus').textContent='❌ 二维码已过期';
+          document.getElementById('qrstatus').textContent='二维码已过期';
           clearInterval(qrTimer);
         }
       });
@@ -336,7 +364,7 @@ function closeQR(){
   clearInterval(qrTimer);
   document.getElementById('qrmodal').classList.remove('show');
   wb.disabled=false;
-  if(!wb.classList.contains('connected')) wb.textContent='微信bot';
+  if(!wb.classList.contains('connected')) wb.textContent='👤';
 }
 </script>
 </body>
@@ -395,7 +423,9 @@ function closeQR(){
                 elapsed = time.time() - start
                 self._json({"reply": reply, "elapsed": round(elapsed, 2)})
             elif self.path == "/api/reset":
-                reset_user(body.get("user_id", "default"))
+                uid = body.get("user_id", "default")
+                chat_web(uid, RESET_KEY)
+                chat_web_agent(uid, RESET_KEY)
                 self._json({"status": "ok"})
             elif self.path == "/api/wechat/qrcode":
                 try:
