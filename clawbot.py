@@ -191,18 +191,22 @@ class ClawBot:
                     return
                 self._seen_ids.append(msg_id)
 
-            # 只处理文本消息
             item_list = msg.get("item_list", [])
             text = ""
+            msg_type = ""
             for item in item_list:
-                if item.get("type") == 1:  # 文本
+                if item.get("type") == 1:
                     text = item.get("text_item", {}).get("text", "")
+                    break
+                elif item.get("type") == 3:
+                    text = item.get("voice_item", {}).get("text", "")
+                    msg_type = "🎤"
                     break
 
             if not text:
                 return
 
-            logger.info("📩 [%s] %s", from_user[:20], text[:100])
+            logger.info("📩 [%s] %s%s", from_user[:20], msg_type, text[:100])
 
             # 调用 AI
             start = time.time()
