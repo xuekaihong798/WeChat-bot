@@ -18,6 +18,8 @@ from collections import deque
 
 import requests
 
+from image_utils import download_ilink_image, save_temp_image
+
 logger = logging.getLogger("clawbot")
 
 BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -194,23 +196,36 @@ class ClawBot:
             item_list = msg.get("item_list", [])
             text = ""
             msg_type = ""
+            images = []
             for item in item_list:
                 if item.get("type") == 1:
                     text = item.get("text_item", {}).get("text", "")
-                    break
+                elif item.get("type") == 2:
+                    image_item = item.get("image_item", {})
+                    encrypt_param = image_item.get("encrypt_query_param", "")
+                    aes_key = image_item.get("aes_key", "")
+                    if encrypt_param:
+                        raw = download_ilink_image(encrypt_param, aes_key)
+                        if raw:
+                            path = save_temp_image(raw)
+                            images.append(path)
+                            msg_type = "📷" if not msg_type else msg_type
+                            logger.info("📷 图片已保存: %s", path)
                 elif item.get("type") == 3:
                     text = item.get("voice_item", {}).get("text", "")
                     msg_type = "🎤"
-                    break
 
-            if not text:
+            if not text and not images:
                 return
 
-            logger.info("📩 [%s] %s%s", from_user[:20], msg_type, text[:100])
+            if images:
+                logger.info("📩 [%s] %s%s + %d 张图片", from_user[:20], msg_type, text[:100], len(images))
+            else:
+                logger.info("📩 [%s] %s%s", from_user[:20], msg_type, text[:100])
 
             # 调用 AI
             start = time.time()
-            reply = self.chat_fn(from_user, text)
+            reply = self.chat_fn(from_user, text, images if images else None)
             elapsed = time.time() - start
             logger.info("📤 回复 (%.1fs): %s", elapsed, reply[:100])
 

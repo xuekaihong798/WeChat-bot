@@ -19,6 +19,10 @@ def load_config() -> dict:
         "local_endpoint_format": os.getenv("LOCAL_ENDPOINT_FORMAT", "openai"),
         # Claude CLI
         "claude_cli_cmd": os.getenv("CLAUDE_CLI_CMD", 'claude -p "{prompt}" --print'),
+        # OpenAI（GPT-4o 图片识别）
+        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+        "openai_base_url": os.getenv("OPENAI_BASE_URL", ""),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o"),
         # 系统提示
         "system_prompt": os.getenv("SYSTEM_PROMPT", "你是一个有帮助的AI助手。"),
         # 微信

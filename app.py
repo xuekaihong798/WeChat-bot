@@ -3,13 +3,33 @@
 启动方式: python app.py
 """
 
+import os
+import subprocess
 import threading
 import time
 
 import webview
 
 
+def _load_env():
+    """从 ~/.zshrc 加载环境变量（GUI 应用不继承 shell 环境）。"""
+    try:
+        result = subprocess.run(
+            ["zsh", "-c", "source ~/.zshrc 2>/dev/null && env"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, _, val = line.partition("=")
+                if key not in os.environ:
+                    os.environ[key] = val
+    except Exception:
+        pass
+
+
 def main():
+    _load_env()
+
     # 在 daemon 线程启动 HTTP Server
     from bot import run_server
 

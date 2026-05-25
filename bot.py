@@ -30,10 +30,14 @@ logger = logging.getLogger("bot")
 
 config = load_config()
 
-# 两个后端：Web 用配置的后端，ClawBot 强制用本地 Claude Code（有工具/Agent 能力）
+# 两个后端：Web 用配置的后端，ClawBot 用 Agent 模式（有工具/Agent 能力）
 web_backend = create_backend(config)
 clawbot_config = dict(config)
-clawbot_config["backend_type"] = "agent"
+# ClawBot 优先用 OpenAI Agent（支持图片识别），否则用 Anthropic Agent
+if clawbot_config.get("openai_api_key"):
+    clawbot_config["backend_type"] = "openai-agent"
+else:
+    clawbot_config["backend_type"] = "agent"
 clawbot_backend = create_backend(clawbot_config)
 
 MAX_HISTORY = config["max_history"]
@@ -47,12 +51,17 @@ clawbot_lock = threading.Lock()
 
 # ── 对话管理 ────────────────────────────────────────
 
-def _make_chat_handler(backend_inst):
-    """创建绑定到指定后端的对话处理器。"""
+def _make_chat_handler(backend_inst, vision_backend=None):
+    """创建绑定到指定后端的对话处理器。
+
+    backend_inst -- 主后端（聊天/推理，如 Anthropic/DeepSeek）
+    vision_backend -- 可选视觉后端（图片识别，如 GPT-4o）
+                       有图片时先由 vision 识别，结果喂给主后端回复。
+    """
     conversations: dict[str, list[dict]] = {}
     lock = threading.Lock()
 
-    def handle(user_id: str, text: str) -> str:
+    def handle(user_id: str, text: str, images: list[str] | None = None) -> str:
         text = text.strip()
 
         if text.lower() == RESET_KEY.lower():
@@ -68,9 +77,40 @@ def _make_chat_handler(backend_inst):
         with lock:
             history = list(conversations.get(user_id, []))[-MAX_HISTORY * 2:]
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": text})
+        # ── 两阶段管线：图片 → 视觉识别 → 主后端聊天 ──
+        user_content_for_history = text  # 存入历史的内容
+
+        if images and vision_backend:
+            vision_content = [
+                {"type": "text", "text": text or "请详细描述这张图片的内容，包含所有关键信息和细节。"},
+            ]
+            for img_path in images:
+                vision_content.append({"type": "image_path", "image_path": img_path})
+            try:
+                description = vision_backend.chat([{"role": "user", "content": vision_content}])
+                logger.info("👁️ 图片识别完成 (%d chars)", len(description))
+            except Exception as e:
+                logger.error("图片识别失败: %s", e)
+                description = "(图片识别失败)"
+
+            augmented = f"{text}\n\n[图片描述]\n{description}" if text else description
+            user_content_for_history = augmented
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": augmented})
+
+        elif images:
+            content = [{"type": "text", "text": text}]
+            for img_path in images:
+                content.append({"type": "image_path", "image_path": img_path})
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": content})
+
+        else:
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": text})
 
         logger.info("📩 [%s] %s", type(backend_inst).__name__[:8], text[:100])
 
@@ -86,7 +126,7 @@ def _make_chat_handler(backend_inst):
 
         with lock:
             hist = conversations.get(user_id, [])
-            hist.append({"role": "user", "content": text})
+            hist.append({"role": "user", "content": user_content_for_history})
             hist.append({"role": "assistant", "content": reply})
             max_msgs = MAX_HISTORY * 2
             if len(hist) > max_msgs:
@@ -98,17 +138,25 @@ def _make_chat_handler(backend_inst):
     return handle
 
 
+# 视觉后端（图片识别 → GPT-4o，作为主后端的"眼睛"）
+vision_backend = None
+if config.get("openai_api_key"):
+    vision_config = dict(config)
+    vision_config["backend_type"] = "openai"
+    vision_backend = create_backend(vision_config)
+    logger.info("👁️ 视觉后端已启用: %s", vision_config.get("openai_model", "gpt-4o"))
+
 # Web 聊天（API 后端，快速响应）
-chat_web = _make_chat_handler(web_backend)
+chat_web = _make_chat_handler(web_backend, vision_backend)
 
 # Web Agent（API + 工具调用，可执行本地操作）
 web_agent_config = dict(config)
 web_agent_config["backend_type"] = "agent"
 web_agent_backend = create_backend(web_agent_config)
-chat_web_agent = _make_chat_handler(web_agent_backend)
+chat_web_agent = _make_chat_handler(web_agent_backend, vision_backend)
 
 # 微信 ClawBot（Agent 模式，可操作电脑）
-chat_agent = _make_chat_handler(clawbot_backend)
+chat_agent = _make_chat_handler(clawbot_backend, vision_backend)
 
 
 # ── ClawBot 扫码接入 ────────────────────────────────
@@ -222,6 +270,20 @@ def run_server():
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from socketserver import ThreadingMixIn
 
+    def _decode_client_images(images_b64: list[str]) -> list[str]:
+        """将前端发来的 base64 data URL 列表转为临时文件路径列表。"""
+        from image_utils import save_temp_image
+        paths = []
+        for b64 in images_b64:
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(b64)
+                paths.append(save_temp_image(raw))
+            except Exception:
+                pass
+        return paths
+
     class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         """多线程 HTTP Server，并发处理请求。"""
         daemon_threads = True
@@ -258,10 +320,16 @@ header{background:var(--card);backdrop-filter:var(--blur);-webkit-backdrop-filte
 #input-area{display:flex;padding:10px 12px 16px;gap:8px;align-items:flex-end;background:var(--card);border-top:1px solid var(--border);position:sticky;bottom:0;backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur)}
 #input{flex:1;padding:11px 18px;border-radius:20px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:15px;font-family:inherit;outline:none;resize:none;min-height:42px;max-height:120px;line-height:1.35;transition:border-color .2s,border-radius .2s}
 #input:focus{border-color:var(--accent);border-radius:22px}
-#send,#wechat-btn{width:42px;height:42px;border-radius:50%;border:none;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:transform .15s,opacity .15s;flex-shrink:0}
+#send,#wechat-btn,#img-btn{width:42px;height:42px;border-radius:50%;border:none;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:transform .15s,opacity .15s;flex-shrink:0}
 #send{background:var(--accent);color:#fff}#send:hover{transform:scale(1.06)}#send:active{transform:scale(0.96)}#send:disabled{opacity:.35;transform:none}
 #wechat-btn{background:var(--green);color:#fff;font-size:14px}#wechat-btn:hover{transform:scale(1.06)}#wechat-btn:disabled{opacity:.35;transform:none}
 #wechat-btn.connected{background:var(--text2)}
+#img-btn{background:var(--bg);color:var(--text2);border:1px solid var(--border);font-size:16px}#img-btn:hover{color:var(--accent);border-color:var(--accent)}
+/* ── Image Previews ── */
+#img-previews{display:flex;gap:6px;padding:4px 14px 0;flex-wrap:wrap;background:var(--card)}
+.img-pv{position:relative;width:52px;height:52px;border-radius:10px;overflow:hidden;border:1px solid var(--border);flex-shrink:0}
+.img-pv img{width:100%;height:100%;object-fit:cover}
+.img-pv .img-rm{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,0.55);color:#fff;border:none;cursor:pointer;font-size:11px;line-height:18px;text-align:center;padding:0}
 /* ── Toolbar ── */
 #toolbar{display:flex;align-items:center;gap:4px;padding:0 14px 6px;background:var(--card)}
 #agent-toggle{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);cursor:pointer;user-select:none;padding:4px 10px;border-radius:14px;background:var(--bg);border:1px solid var(--border);transition:all .2s}
@@ -285,11 +353,14 @@ header{background:var(--card);backdrop-filter:var(--blur);-webkit-backdrop-filte
 <header><span>WeChat-bot</span></header>
 <div id="chat"><div class="msg system">发送消息开始对话</div></div>
 <div id="toolbar"><label id="agent-toggle" onclick="toggleAgent()"><input type="checkbox" id="agent-cb"> 执行模式</label></div>
+<div id="img-previews"></div>
 <div id="input-area">
   <button id="wechat-btn" onclick="startWechat()" title="微信接入">👤</button>
+  <button id="img-btn" onclick="document.getElementById('img-input').click()" title="添加图片">🖼</button>
   <textarea id="input" placeholder="消息..." rows="1" autofocus></textarea>
   <button id="send" onclick="send()">↑</button>
 </div>
+<input type="file" id="img-input" accept="image/*" multiple style="display:none" onchange="addFiles(this.files)">
 <div id="status">AI 后端: {backend}</div>
 
 <div id="qrmodal">
@@ -304,24 +375,58 @@ header{background:var(--card);backdrop-filter:var(--blur);-webkit-backdrop-filte
 
 <script>
 const c=document.getElementById('chat'),i=document.getElementById('input'),b=document.getElementById('send'),
-      wb=document.getElementById('wechat-btn'),uid='web_'+Date.now(),cb=document.getElementById('agent-cb');
-let qrTimer=null;
+      wb=document.getElementById('wechat-btn'),uid='web_'+Date.now(),cb=document.getElementById('agent-cb'),
+      pv=document.getElementById('img-previews');
+let qrTimer=null,images=[];
 
-function add(role,t){
-  const d=document.createElement('div');d.className='msg '+role;d.textContent=t;c.appendChild(d);
+function add(role,t,imgUrls){
+  const d=document.createElement('div');d.className='msg '+role;
+  if(imgUrls&&imgUrls.length){
+    const imgs=imgUrls.map(u=>`<img src="${u}" style="max-width:200px;max-height:200px;border-radius:10px;margin:4px 0;display:block">`).join('');
+    d.innerHTML='<div>'+t.replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div>'+imgs;
+  }else{
+    d.textContent=t;
+  }
+  c.appendChild(d);
   requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight});
 }
+function addFiles(files){
+  for(let f of files){
+    const r=new FileReader();
+    r.onload=function(){images.push(r.result);renderPreviews()};
+    r.readAsDataURL(f);
+  }
+  document.getElementById('img-input').value='';
+}
+function removeImg(idx){images.splice(idx,1);renderPreviews()}
+function renderPreviews(){
+  pv.innerHTML=images.map((u,i)=>`<div class="img-pv"><img src="${u}"><button class="img-rm" onclick="removeImg(${i})">×</button></div>`).join('');
+}
+document.addEventListener('paste',function(e){
+  const items=e.clipboardData&&e.clipboardData.items;
+  if(!items)return;
+  for(let item of items){
+    if(item.type.startsWith('image/')){
+      e.preventDefault();
+      const f=item.getAsFile();
+      const r=new FileReader();
+      r.onload=function(){images.push(r.result);renderPreviews()};
+      r.readAsDataURL(f);
+    }
+  }
+});
 function toggleAgent(){
   const on=cb.checked;
   document.getElementById('agent-toggle').className='agent-toggle'+(on?' active':'');
   i.placeholder=on?'输入指令，可执行本地操作…':'消息…';
 }
 function send(){
-  const t=i.value.trim();if(!t)return;
+  const t=i.value.trim();if(!t&&!images.length)return;
   const agent=cb.checked;
-  add('user',t);i.value='';b.disabled=true;
+  const imgs=images.slice();
+  add('user',t||'(图片)',imgs);i.value='';images=[];renderPreviews();b.disabled=true;
   const ep=agent?'/api/agent':'/api/chat';
-  fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:t,user_id:uid})})
+  fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:t||'描述这张图片',user_id:uid,images:imgs})})
     .then(r=>r.json()).then(d=>{add('assistant',d.reply||d.error)})
     .catch(e=>add('system','请求失败: '+e.message)).finally(()=>{b.disabled=false;i.focus()});
 }
@@ -407,19 +512,23 @@ function closeQR(){
             if self.path == "/api/chat":
                 msg = body.get("message", "").strip()
                 uid = body.get("user_id", "default")
+                client_images = body.get("images", [])
                 if not msg:
                     return self._json({"error": "message 不能为空"}, 400)
+                image_paths = _decode_client_images(client_images) if client_images else None
                 start = time.time()
-                reply = chat_web(uid, msg)
+                reply = chat_web(uid, msg, image_paths)
                 elapsed = time.time() - start
                 self._json({"reply": reply, "elapsed": round(elapsed, 2)})
             elif self.path == "/api/agent":
                 msg = body.get("message", "").strip()
                 uid = body.get("user_id", "default")
+                client_images = body.get("images", [])
                 if not msg:
                     return self._json({"error": "message 不能为空"}, 400)
+                image_paths = _decode_client_images(client_images) if client_images else None
                 start = time.time()
-                reply = chat_web_agent(uid, msg)
+                reply = chat_web_agent(uid, msg, image_paths)
                 elapsed = time.time() - start
                 self._json({"reply": reply, "elapsed": round(elapsed, 2)})
             elif self.path == "/api/reset":
